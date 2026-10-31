@@ -1,0 +1,83 @@
+---
+- name: Validate supported Docker host
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.distribution == 'Ubuntu'
+      - ansible_facts.distribution_version in ['24.04', '26.04']
+      - ansible_facts.architecture in ['x86_64', 'aarch64']
+    fail_msg: This role supports Ubuntu Server 24.04 or 26.04 on amd64 or arm64.
+
+- name: Install Docker Engine and Compose
+  when: not ansible_check_mode
+  block:
+    - name: Collect installed package information
+      ansible.builtin.package_facts:
+        manager: apt
+
+    - name: Reject conflicting container packages without removing them
+      ansible.builtin.assert:
+        that:
+          - >-
+            ['docker.io', 'docker-compose', 'docker-compose-v2', 'docker-doc',
+             'docker-buildx', 'podman-docker', 'containerd', 'runc']
+            | intersect(ansible_facts.packages.keys() | list) | length == 0
+        fail_msg: >-
+          Distribution Docker/containerd packages conflict with Docker CE.
+          Review and remove conflicting packages manually before deploying.
+
+    - name: Install Docker repository prerequisites
+      ansible.builtin.apt:
+        name: ca-certificates
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Create APT keyring directory
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Download Docker repository signing key
+      ansible.builtin.get_url:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        dest: /etc/apt/keyrings/docker.asc
+        owner: root
+        group: root
+        mode: '0644'
+      register: docker_repository_key
+
+    - name: Configure the official Docker APT repository
+      ansible.builtin.copy:
+        dest: /etc/apt/sources.list.d/docker.sources
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          Types: deb
+          URIs: https://download.docker.com/linux/ubuntu
+          Suites: {{ ansible_facts.distribution_release }}
+          Components: stable
+          Architectures: {{ 'amd64' if ansible_facts.architecture == 'x86_64' else 'arm64' }}
+          Signed-By: /etc/apt/keyrings/docker.asc
+      register: docker_repository_source
+
+    - name: Install Docker Engine and Compose plugin
+      ansible.builtin.apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        state: present
+        update_cache: true
+        cache_valid_time: "{{ 0 if docker_repository_key.changed or docker_repository_source.changed else 3600 }}"
+
+    - name: Start and enable Docker
+      ansible.builtin.systemd_service:
+        name: docker
+        state: started
+        enabled: true

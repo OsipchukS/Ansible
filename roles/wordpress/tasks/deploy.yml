@@ -1,0 +1,240 @@
+---
+- name: Collect service information
+  ansible.builtin.service_facts:
+
+- name: Reject native web servers using the default HTTP port
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.services.get('apache2.service', {}).get('state', 'stopped') != 'running'
+      - ansible_facts.services.get('nginx.service', {}).get('state', 'stopped') != 'running'
+    fail_msg: >-
+      A native Apache or nginx service is running. Free port 80 before deployment,
+      or choose another wordpress_http_port. Existing services are not stopped by this role.
+  when: wordpress_http_port | int == 80
+
+- name: Create Compose project directory
+  ansible.builtin.file:
+    path: "{{ wordpress_project_path }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+
+- name: Create protected secrets directory
+  ansible.builtin.file:
+    path: "{{ wordpress_project_path }}/secrets"
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+
+- name: Inspect the deployed database password file
+  ansible.builtin.stat:
+    path: "{{ wordpress_project_path }}/secrets/db_password"
+    get_checksum: false
+  register: wordpress_db_secret_file
+
+- name: Read the deployed database password for comparison
+  ansible.builtin.slurp:
+    src: "{{ wordpress_project_path }}/secrets/db_password"
+  register: wordpress_existing_db_secret
+  when: wordpress_db_secret_file.stat.exists
+  no_log: true
+
+- name: Refuse implicit database password rotation
+  ansible.builtin.assert:
+    that:
+      - wordpress_existing_db_secret.content | b64decode == wordpress_db_password | string
+    fail_msg: >-
+      The Vault database password differs from the deployed password.
+      Rotate the MariaDB user password explicitly before changing the secret file.
+  when: wordpress_db_secret_file.stat.exists
+  no_log: true
+
+- name: Inspect persisted database settings
+  ansible.builtin.stat:
+    path: "{{ wordpress_project_path }}/database-settings.json"
+  register: wordpress_database_settings_file
+
+- name: Read persisted database settings
+  ansible.builtin.slurp:
+    src: "{{ wordpress_project_path }}/database-settings.json"
+  register: wordpress_existing_database_settings
+  when: wordpress_database_settings_file.stat.exists
+
+- name: Refuse implicit changes to database initialization settings
+  ansible.builtin.assert:
+    that:
+      - >-
+        wordpress_existing_database_settings.content | b64decode | from_json
+        == {'name': wordpress_db_name, 'user': wordpress_db_user, 'project': wordpress_project_name}
+    fail_msg: >-
+      Existing database name, user or Compose project name changed.
+      These settings initialize persistent volumes only once; migrate them explicitly.
+  when: wordpress_database_settings_file.stat.exists
+
+- name: Persist database initialization settings
+  ansible.builtin.copy:
+    dest: "{{ wordpress_project_path }}/database-settings.json"
+    content: "{{ {'name': wordpress_db_name, 'user': wordpress_db_user, 'project': wordpress_project_name} | to_nice_json }}\n"
+    owner: root
+    group: root
+    mode: '0600'
+
+- name: Write the database password for Compose secrets
+  ansible.builtin.copy:
+    dest: "{{ wordpress_project_path }}/secrets/db_password"
+    content: "{{ wordpress_db_password }}"
+    owner: root
+    group: root
+    # Parent directories are root-only; container users must read the bind mount.
+    mode: '0444'
+  no_log: true
+  diff: false
+
+- name: Generate a persistent database root password on the target
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -c
+      - |
+        import os
+        import secrets
+        import sys
+        fd = os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o444)
+        with os.fdopen(fd, 'w') as stream:
+            stream.write(secrets.token_urlsafe(48))
+      - "{{ wordpress_project_path }}/secrets/db_root_password"
+    creates: "{{ wordpress_project_path }}/secrets/db_root_password"
+  no_log: true
+
+- name: Set database root secret permissions
+  ansible.builtin.file:
+    path: "{{ wordpress_project_path }}/secrets/db_root_password"
+    owner: root
+    group: root
+    mode: '0444'
+
+- name: Block the public web installer during automated setup
+  ansible.builtin.copy:
+    dest: "{{ wordpress_project_path }}/apache-bootstrap.conf"
+    content: |
+      <LocationMatch "^/wp-admin/(install|setup-config)\.php$">
+          Require all denied
+      </LocationMatch>
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Write Compose configuration without plaintext credentials
+  ansible.builtin.template:
+    src: compose.yml.j2
+    dest: "{{ wordpress_project_path }}/compose.yml"
+    owner: root
+    group: root
+    mode: '0600'
+
+- name: Start WordPress and MariaDB and wait for readiness
+  community.docker.docker_compose_v2:
+    project_src: "{{ wordpress_project_path }}"
+    project_name: "{{ wordpress_project_name }}"
+    services:
+      - db
+      - wordpress
+    state: present
+    pull: missing
+    wait: true
+    wait_timeout: 180
+
+- name: Check whether the WordPress database is initialized
+  community.docker.docker_compose_v2_run:
+    project_src: "{{ wordpress_project_path }}"
+    project_name: "{{ wordpress_project_name }}"
+    service: cli
+    argv:
+      - wp
+      - core
+      - is-installed
+    cleanup: true
+    no_deps: true
+    tty: false
+  register: wordpress_install_status
+  changed_when: false
+  failed_when: wordpress_install_status.rc not in [0, 1]
+
+- name: Install WordPress and create the initial administrator
+  community.docker.docker_compose_v2_run:
+    project_src: "{{ wordpress_project_path }}"
+    project_name: "{{ wordpress_project_name }}"
+    service: cli
+    argv:
+      - wp
+      - core
+      - install
+      - "--url={{ wordpress_site_url }}"
+      - "--title={{ wordpress_site_title }}"
+      - "--admin_user={{ wordpress_admin_user }}"
+      - "--admin_email={{ wordpress_admin_email }}"
+      - --skip-email
+      - --prompt=admin_password
+    stdin: "{{ wordpress_admin_password }}"
+    stdin_add_newline: true
+    cleanup: true
+    no_deps: true
+    tty: false
+  when: wordpress_install_status.rc == 1
+  no_log: true
+
+- name: Read WordPress public URLs
+  community.docker.docker_compose_v2_run:
+    project_src: "{{ wordpress_project_path }}"
+    project_name: "{{ wordpress_project_name }}"
+    service: cli
+    argv:
+      - wp
+      - option
+      - get
+      - "{{ item }}"
+    cleanup: true
+    no_deps: true
+    tty: false
+  register: wordpress_url_status
+  changed_when: false
+  loop:
+    - home
+    - siteurl
+
+- name: Synchronize changed WordPress public URLs
+  community.docker.docker_compose_v2_run:
+    project_src: "{{ wordpress_project_path }}"
+    project_name: "{{ wordpress_project_name }}"
+    service: cli
+    argv:
+      - wp
+      - option
+      - update
+      - "{{ item.item }}"
+      - "{{ wordpress_site_url }}"
+    cleanup: true
+    no_deps: true
+    tty: false
+  loop: "{{ wordpress_url_status.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: item.stdout | trim != wordpress_site_url
+
+- name: Verify WordPress responds over HTTP on the target
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ wordpress_http_port }}/wp-login.php"
+    headers:
+      Host: "{{ wordpress_public_host }}{{ ':' ~ (wordpress_http_port | string) if wordpress_http_port | int != 80 else '' }}"
+    status_code: 200
+    follow_redirects: none
+  register: wordpress_http_result
+  retries: 12
+  delay: 5
+  until: wordpress_http_result.status == 200
+
+- name: Report the WordPress address
+  ansible.builtin.debug:
+    msg: "WordPress: {{ wordpress_site_url }} | Administration: {{ wordpress_site_url }}/wp-admin/"

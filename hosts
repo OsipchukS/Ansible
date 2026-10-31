@@ -1,0 +1,4 @@
+[webservers]
+server1 ansible_host=13.51.170.9 ansible_user=ubuntu ansible_ssh_private_key_file=/etc/ansible/keys/Stockholm.pem
+server2 ansible_host=13.48.13.34 ansible_user=ubuntu ansible_ssh_private_key_file=/etc/ansible/keys/Stockholm.pem
+

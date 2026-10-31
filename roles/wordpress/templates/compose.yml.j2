@@ -1,0 +1,97 @@
+services:
+  db:
+    image: {{ wordpress_db_image | to_json }}
+    restart: unless-stopped
+    environment:
+      MARIADB_DATABASE: {{ wordpress_db_name | to_json }}
+      MARIADB_USER: {{ wordpress_db_user | to_json }}
+      MARIADB_PASSWORD_FILE: /run/secrets/db_password
+      MARIADB_ROOT_PASSWORD_FILE: /run/secrets/db_root_password
+    secrets:
+      - db_password
+      - db_root_password
+    volumes:
+      - db_data:/var/lib/mysql
+    networks:
+      - database
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    logging: &logging
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  wordpress:
+    image: {{ wordpress_image | to_json }}
+    restart: unless-stopped
+    ports:
+      - {{ ('0.0.0.0:' ~ (wordpress_http_port | string) ~ ':80') | to_json }}
+    environment: &wordpress_environment
+      WORDPRESS_DB_HOST: db:3306
+      WORDPRESS_DB_NAME: {{ wordpress_db_name | to_json }}
+      WORDPRESS_DB_USER: {{ wordpress_db_user | to_json }}
+      WORDPRESS_DB_PASSWORD_FILE: /run/secrets/db_password
+    secrets:
+      - db_password
+    volumes:
+      - wordpress_data:/var/www/html
+      - ./apache-bootstrap.conf:/etc/apache2/conf-enabled/wordpress-bootstrap.conf:ro
+    networks:
+      - frontend
+      - database
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - php
+        - -r
+        - "exit(is_file('/var/www/html/wp-config.php') && @fsockopen('127.0.0.1', 80) ? 0 : 1);"
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    logging: *logging
+
+  cli:
+    image: {{ wordpress_cli_image | to_json }}
+    profiles: [tools]
+    user: "33:33"
+    working_dir: /var/www/html
+    environment:
+      <<: *wordpress_environment
+      HOME: /tmp
+    secrets:
+      - db_password
+    volumes:
+      - wordpress_data:/var/www/html
+    networks:
+      - frontend
+      - database
+    depends_on:
+      db:
+        condition: service_healthy
+      wordpress:
+        condition: service_healthy
+    logging: *logging
+
+networks:
+  frontend:
+  database:
+    internal: true
+
+volumes:
+  db_data:
+  wordpress_data:
+
+secrets:
+  db_password:
+    file: ./secrets/db_password
+  db_root_password:
+    file: ./secrets/db_root_password

@@ -1,0 +1,47 @@
+---
+packages_list:
+  - ca-certificates
+  - curl
+  - git
+  - vim
+  - htop
+  - unzip
+
+# Fresh Ubuntu Server 24.04 deployment using Docker Compose and HTTP by IP.
+wordpress_project_name: wordpress
+wordpress_project_path: /opt/wordpress
+wordpress_public_host: "{{ ansible_host | default(inventory_hostname) }}"
+wordpress_http_port: 80
+wordpress_site_url: "http://{{ wordpress_public_host }}{{ ':' ~ (wordpress_http_port | string) if wordpress_http_port | int != 80 else '' }}"
+
+# Images are pulled only when missing. Review upgrades and back up volumes first.
+wordpress_image: wordpress:7.1.4-php8.3-apache
+wordpress_cli_image: wordpress:cli-2.12.0-php8.3
+wordpress_db_image: mariadb:11.4
+
+# Administrator settings apply only during the initial installation.
+wordpress_admin_email: admin@example.com
+wordpress_admin_user: wordpressadmin
+wordpress_site_title: WordPress Site
+
+# Database settings initialize the database volume only once.
+wordpress_db_name: wordpress
+wordpress_db_user: wordpress
+
+# Ansible Vault encrypted WordPress passwords. Provide the Vault password at
+# runtime with --ask-vault-pass; the Vault password is stored outside the
+# repository. See README.md for the encrypt_string commands.
+wordpress_db_password: !vault |
+          $ANSIBLE_VAULT;1.1;AES256
+          39383330653633373062663736616134373931363231326463356361653663623761386635393832
+          3830333639303336653435646131313931336333376532660a303063346239393034656132636639
+          62373333356530326237656135626364613132303436353231643230353865663335313463316465
+          3738333462356461650a306265303730656162653261313334663062623238356666373565616162
+          3535
+wordpress_admin_password: !vault |
+          $ANSIBLE_VAULT;1.1;AES256
+          37663134333363333534626234326234383635666636323833666331316261393661653262376439
+          6534306365393633383831663435363533646437643133610a363432333962373965373236323435
+          32316234366232646262623636353532343237333336323765663733323239613562393062353264
+          3262643236303933650a393465323465613762363461653839326538646164633130666363353333
+          6262

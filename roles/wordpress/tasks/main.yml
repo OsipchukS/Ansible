@@ -1,0 +1,46 @@
+---
+- name: Validate containerized WordPress settings
+  ansible.builtin.assert:
+    that:
+      - wordpress_public_host | length > 0
+      - wordpress_http_port | int > 0
+      - wordpress_http_port | int < 65536
+      - wordpress_project_name is match('^[a-z0-9][a-z0-9_-]*$')
+      - wordpress_project_path is match('^/opt/[A-Za-z0-9/_-]+$')
+      - wordpress_db_name is match('^[A-Za-z0-9_]+$')
+      - wordpress_db_user is match('^[A-Za-z0-9_]+$')
+      - wordpress_db_user != 'root'
+      - wordpress_admin_user | length > 0
+      - wordpress_admin_email is match('^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$')
+    fail_msg: Check WordPress settings in group_vars/webservers.yml.
+
+- name: Validate Vault password inputs without exposing them
+  ansible.builtin.assert:
+    that:
+      - wordpress_db_password | default('') | string | length > 0
+      - wordpress_admin_password | default('') | string | length > 0
+      - >-
+        '\n' not in (wordpress_db_password | string)
+      - >-
+        '\r' not in (wordpress_db_password | string)
+      - >-
+        '\n' not in (wordpress_admin_password | string)
+      - >-
+        '\r' not in (wordpress_admin_password | string)
+  no_log: true
+
+- name: Render and parse Compose configuration for validation
+  ansible.builtin.set_fact:
+    wordpress_compose_definition: "{{ lookup('ansible.builtin.template', 'compose.yml.j2') | from_yaml }}"
+
+- name: Explain check mode limitations
+  ansible.builtin.debug:
+    msg: >-
+      Check mode validates host settings, Vault inputs and the Compose template.
+      Docker installation, remote configuration changes, image pulls, database
+      readiness and WordPress installation are skipped and require a real run.
+  when: ansible_check_mode
+
+- name: Deploy WordPress containers
+  ansible.builtin.import_tasks: deploy.yml
+  when: not ansible_check_mode
