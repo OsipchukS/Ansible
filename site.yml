@@ -1,0 +1,8 @@
+---
+- name: Deploy containerized WordPress on webservers
+  hosts: webservers
+  become: true
+  roles:
+    - packages
+    - docker
+    - wordpress
