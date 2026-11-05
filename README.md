@@ -161,3 +161,62 @@ Do not run `docker compose down --volumes` unless you intend to delete site data
 - [WordPress official image and WP-CLI UID requirements](https://hub.docker.com/_/wordpress)
 - [Ansible Compose module](https://docs.ansible.com/ansible/latest/collections/community/docker/docker_compose_v2_module.html)
 - [Ansible Compose run module](https://docs.ansible.com/ansible/latest/collections/community/docker/docker_compose_v2_run_module.html)
+
+## Collect secret.txt from Windows
+
+`collect_windows_file.yml` searches Windows for `secret.txt` and copies every
+match to the Linux Ansible control node with `ansible.builtin.fetch`.
+WordPress deployment remains independent in `site.yml`.
+
+Prerequisites:
+
+- Enable PowerShell remoting on the Windows host and ensure WinRM listens on TCP 5985.
+- Allow TCP 5985 in both Windows Firewall and the AWS Security Group from the
+  control node's current public IP only. Update the allowed IP when it changes.
+- Use the existing `win1` inventory entry with NTLM authentication.
+- Install `pywinrm` on the control node (`sudo apt install python3-winrm`,
+  or install `requirements.txt` in a virtual environment) and run
+  `ansible-galaxy collection install -r requirements.yml`.
+
+Configure `windows_collect_filename`, `windows_collect_paths`, and
+`windows_collect_dest` in `group_vars/windows.yml`. The default search covers
+`C:\`, including hidden entries, without following symbolic links. A full disk
+scan can be expensive; use a narrower path when the expected location is known.
+Directories inaccessible to the Windows account cannot be fully searched.
+
+Read the Windows password without storing it in shell history, then validate
+syntax and preview a Desktop search:
+
+```bash
+read -rsp 'Windows password: ' windows_pass; echo
+export windows_pass
+ansible-playbook collect_windows_file.yml --syntax-check
+ansible win1 -m ansible.windows.win_ping
+ansible-playbook collect_windows_file.yml --check --diff --limit win1 -e '{"windows_collect_paths":["C:\\Users\\Administrator\\Desktop"]}'
+```
+
+After reviewing the results, copy the matching files:
+
+```bash
+ansible-playbook collect_windows_file.yml --limit win1 -e '{"windows_collect_paths":["C:\\Users\\Administrator\\Desktop"]}'
+unset windows_pass
+```
+
+For example, `C:\Users\Administrator\Desktop\secret.txt` is copied to
+`collected/win1/C/Users/Administrator/Desktop/secret.txt` under the project
+directory on the control node. Host and drive paths prevent name collisions.
+Copying validates checksums and preserves file bytes. Files have mode `0600`,
+and host destination directories have mode `0700`. The Windows original is
+retained; file contents are not printed by the playbook.
+
+Check mode searches without copying. No matches causes an explicit failure.
+Existing copies are updated when source contents change. `collected/`,
+PEM keys and `.secret` are excluded from version control.
+
+To copy into another writable directory on the control node, add
+`-e windows_collect_dest=/home/user/windows-files` to the playbook command.
+The Windows password comes only from `windows_pass`; this playbook does not
+require a WordPress Vault password.
+
+References: [win_find](https://docs.ansible.com/ansible/latest/collections/ansible/windows/win_find_module.html)
+and [fetch](https://docs.ansible.com/ansible/latest/collections/ansible/builtin/fetch_module.html).

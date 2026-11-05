@@ -1,3 +1,5 @@
 /keys/*
 /.secret
 *.pem
+/collected/
+terraform.tfstate
