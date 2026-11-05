@@ -1,0 +1,100 @@
+---
+- name: Find Windows files and download them to the Linux control node
+  hosts: windows
+  gather_facts: false
+  become: false
+
+  vars:
+    # Pass the separator as a value to avoid backslash escaping in templates.
+    windows_path_separator: '\'
+
+  tasks:
+    - name: Validate file collection settings and Windows credentials
+      ansible.builtin.assert:
+        that:
+          - ansible_password | default('') | length > 0
+          - windows_collect_filename | length > 0
+          - windows_collect_filename == (windows_collect_filename | win_basename)
+          - "':' not in windows_collect_filename"
+          - windows_collect_paths is sequence
+          - windows_collect_paths is not string
+          - windows_collect_paths | length > 0
+          - windows_collect_dest is match('^/')
+        fail_msg: >-
+          Set windows_pass in the control node environment, provide a filename
+          without directory separators, a non-empty list of Windows search
+          paths, and an absolute Linux destination directory.
+      no_log: true
+
+    - name: Find matching files including hidden files and directories
+      ansible.windows.win_find:
+        paths: "{{ windows_collect_paths }}"
+        patterns:
+          - "^{{ windows_collect_filename | regex_escape }}$"
+        use_regex: true
+        file_type: file
+        recurse: true
+        hidden: true
+        follow: false
+        get_checksum: false
+      register: windows_collect_matches
+
+    - name: Require at least one matching file
+      ansible.builtin.assert:
+        that:
+          - windows_collect_matches.matched | int > 0
+        fail_msg: >-
+          No {{ windows_collect_filename }} files were found in the configured
+          search paths. Check the filename, search paths and Windows read permissions.
+
+    - name: Create a protected destination on the Linux control node
+      ansible.builtin.file:
+        path: "{{ windows_collect_dest }}/{{ inventory_hostname }}"
+        state: directory
+        mode: '0700'
+      delegate_to: localhost
+
+    - name: Create destination subdirectories for matching Windows files
+      ansible.builtin.file:
+        path: >-
+          {{ windows_collect_dest }}/{{ inventory_hostname }}/{{ item.path | win_dirname | replace(':', '') | replace(windows_path_separator, '/') }}
+        state: directory
+        mode: '0700'
+      delegate_to: localhost
+      loop: "{{ windows_collect_matches.files }}"
+      loop_control:
+        label: "{{ item.path }}"
+
+    - name: Copy matching files from Windows to the Linux control node
+      ansible.builtin.fetch:
+        src: "{{ item.path }}"
+        dest: >-
+          {{ windows_collect_dest }}/{{ inventory_hostname }}/{{ item.path | replace(':', '') | replace(windows_path_separator, '/') }}
+        flat: true
+        fail_on_missing: true
+        validate_checksum: true
+      loop: "{{ windows_collect_matches.files }}"
+      loop_control:
+        label: "{{ item.path }}"
+      register: windows_collect_downloads
+      when: not ansible_check_mode
+      diff: false
+
+    - name: Restrict permissions on copied files
+      ansible.builtin.file:
+        path: "{{ item.dest }}"
+        state: file
+        mode: '0600'
+      delegate_to: localhost
+      loop: "{{ windows_collect_downloads.results | default([]) | selectattr('dest', 'defined') | list }}"
+      loop_control:
+        label: "{{ item.dest }}"
+      when: not ansible_check_mode
+
+    - name: Report collection results without displaying file contents
+      ansible.builtin.debug:
+        msg: >-
+          Found {{ windows_collect_matches.matched }} matching file(s).
+          Destination on the Linux control node:
+          {{ windows_collect_dest }}/{{ inventory_hostname }}/.
+          {{ 'Check mode: files were not downloaded.' if ansible_check_mode else 'Download completed.' }}

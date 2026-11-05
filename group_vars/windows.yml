@@ -1,0 +1,16 @@
+---
+# Windows host connection settings for the [windows] inventory group.
+
+# The password is never stored in the repository. It is read from the
+# control node environment variable `windows_pass`. Set it before running
+# playbooks, for example:
+#   export windows_pass='<password>'
+ansible_password: "{{ lookup('env', 'windows_pass') }}"
+
+# Search for this exact filename, including hidden files and directories.
+windows_collect_filename: secret.txt
+windows_collect_paths:
+  - 'C:\'
+
+# Download onto the Linux control node, preserving the host and Windows path.
+windows_collect_dest: "{{ playbook_dir }}/collected"

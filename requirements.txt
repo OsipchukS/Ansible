@@ -1,0 +1,7 @@
+# Python dependencies for the Ansible control node.
+# Install with: pip install -r requirements.txt
+#
+# Ansible collection dependencies live in requirements.yml and are
+# installed separately with: ansible-galaxy collection install -r requirements.yml
+
+pywinrm>=0.4.3
